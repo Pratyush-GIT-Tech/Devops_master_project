@@ -1,0 +1,113 @@
+name: CI-CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: pratyush-dev/devops-master-project
+  IMAGE_TAG: latest
+  REGISTRY: docker.io
+  TF_DIRECTORY: terraform
+  NODE_APP_DIR: node-app
+
+jobs:
+  tfsec:
+    name: Run tfsec on Terraform code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: ${{ env.TF_DIRECTORY }}
+        continue-on-error: true  # Optional: allow build to continue even if issues found
+
+  trivy:
+    name: Run Trivy image scan
+    runs-on: ubuntu-latest
+    needs: tfsec
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build image for scanning
+        run: |
+          docker build -t $REGISTRY/${IMAGE_NAME}:${IMAGE_TAG} $NODE_APP_DIR
+
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@0.13.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+  terraform-apply:
+    name: Terraform Apply (manual)
+    runs-on: ubuntu-latest
+    needs: [tfsec, trivy]
+    if: github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIRECTORY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+  deploy-node-app:
+    name: Build and Push Node.js App Docker Image
+    runs-on: ubuntu-latest
+    needs: [terraform-apply]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t $REGISTRY/${IMAGE_NAME}:${IMAGE_TAG} $NODE_APP_DIR
+
+      - name: Push Docker image
+        run: |
+          docker push $REGISTRY/${IMAGE_NAME}:${IMAGE_TAG}
